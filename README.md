@@ -27,6 +27,8 @@ Powered by [danielgatis/rembg](https://github.com/danielgatis/rembg) running as 
 - **CPU & GPU (CUDA) backends** - switchable at any time from within the app
 - **Post-processing controls** - threshold, edge feather, shrink/expand mask, background mode, alpha matting
 - **Live re-apply** - sliders update all completed images instantly without re-running inference
+- **Automatic packshot crop** - transparent results are cropped after post-processing, without scaling the product
+- **Drag finished PNGs out** - drag a result into a browser upload target or Explorer without choosing an output folder or saving first
 - **Before/after comparison lightbox** - drag a slider to compare original vs result at full size
 - **Gallery view modes** - large grid, small grid, or list view with pagination
 - **Auto-save** - results saved to a configurable output folder as each image finishes
@@ -158,3 +160,26 @@ src/
 ## Adding a custom icon
 
 Place a 256x256 `icon.ico` in `assets/` - electron-builder picks it up automatically.
+
+
+## Packshot workflow
+
+Drop an image, click **Remove backgrounds**, then drag its finished result preview into the receiving application. All gallery modes support this in Electron. The comparison lightbox has a **Drag PNG** handle so dragging the comparison divider still works normally.
+
+Transparent PNGs use the bounds of the final alpha after threshold, morphology, and feathering. Alpha values of 0–2 do not anchor the crop; nearby soft tails and a two-pixel edge guard are retained. Empty or nearly invisible foregrounds keep their original dimensions. Solid-color and blurred-background exports keep the full canvas. The before/after comparison retains original positioning; the gallery, PNG download, ZIP, auto-save, and native drag use the cropped result.
+
+Settings changes immediately disable dragging the previous result. Only the latest completed revision becomes draggable. Electron prepares an immutable temporary PNG using a private token; no output folder is needed. Unused files are released on replacement/removal. Files that have been dragged remain available until normal app exit, so a receiving application can finish reading them. An abnormal termination can leave the session's temporary directory behind. Existing auto-save behavior remains initial-processing only; reprocessed results can be dragged or downloaded.
+
+Electron validates rembg's successful OpenAPI response and background-removal route during startup, then uses main-process lifecycle events instead of periodic renderer HTTP polling. This indicates API readiness; model loading still happens on first processing. Browser-only development checks the same endpoint periodically.
+
+### Workflow checks
+
+Run the focused tests with Node 20+:
+
+```powershell
+node --test tests/workflow.test.js
+& node_modules/electron/dist/electron.exe tests/electron-workflow.cjs
+npm run build
+```
+
+The Electron check runs a hidden window and verifies the actual worker's PNG output and native PNG preparation. For a manual Windows smoke test, leave the output folder unset, process an image, and drag it into both Explorer and a Chrome file-upload drop target. Repeat after rapidly changing threshold, feather, and shrink/expand; the dropped PNG should match the latest gallery result. Also test duplicate filenames and removal of an item after dropping it. External targets must support file drops.

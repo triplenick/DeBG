@@ -928,3 +928,9 @@ footer {
 }
 .lbl-l { left: 14px; }
 .lbl-r { right: 14px; }
+.app [data-result-draggable="true"] {
+  cursor: grab;
+  -webkit-user-drag: element;
+}
+.app [data-result-draggable="true"]:active { cursor: grabbing; }
+.tag { pointer-events: none; }

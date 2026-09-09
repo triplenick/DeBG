@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu, nativeImage } = require('electron');
 const path = require('path');
-const net = require('net');
+const { checkReadiness } = require('./server-health.cjs');
+const { createDragFiles } = require('./drag-files.cjs');
 const { spawn } = require('child_process');
 const { existsSync, mkdirSync, readdirSync } = require('fs');
 const { readFile, writeFile, mkdir } = require('fs').promises;
@@ -58,74 +59,76 @@ async function saveConfig(patch) {
 let rembgProcess = null;
 let mainWindow = null;
 
+let serverState = { running: false, ready: false, starting: false, port: SERVER_PORT, revision: 0 };
+let startupController;
+let serverOperation = Promise.resolve();
+
+function publishServer(patch) {
+  serverState = { ...serverState, ...patch, revision: serverState.revision + 1 };
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('server:state', serverState);
+}
+
 function startServer(config) {
-  if (rembgProcess) stopServer();
-
-  const rembgExe = getRembgExe(config.venvPath || VENV_PATH());
-  if (!existsSync(rembgExe)) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('server:error', { msg: 'rembg executable not found. Please re-run setup.' });
+  // Serialize restarts so an old child cannot steal the new child's port/state.
+  serverOperation = serverOperation.then(async () => {
+    await stopServer();
+    const rembgExe = getRembgExe(config.venvPath || VENV_PATH());
+    if (!existsSync(rembgExe)) {
+      publishServer({ starting: false, error: 'rembg executable not found. Please re-run setup.' });
+      return;
     }
-    return;
-  }
-
-  mkdirSync(MODELS_PATH(), { recursive: true });
-
-  rembgProcess = spawn(rembgExe, ['s', '--host', '127.0.0.1', '--port', String(SERVER_PORT), '--no-ui'], {
-    windowsHide: true,
-    env: { ...process.env, U2NET_HOME: MODELS_PATH(), BROWSER: 'nul' },
-  });
-
-  rembgProcess.stdout.on('data', (d) => console.log('[rembg]', d.toString().trim()));
-  rembgProcess.stderr.on('data', (d) => console.error('[rembg]', d.toString().trim()));
-  rembgProcess.on('exit', (code) => {
-    rembgProcess = null;
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('server:error', { msg: `rembg server exited (code ${code})` });
-    }
-  });
-
-  // Notify renderer once port accepts connections
-  pollPortOpen(SERVER_PORT, 60000).then((ok) => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (ok) {
-      mainWindow.webContents.send('server:ready', { port: SERVER_PORT });
-    } else {
-      mainWindow.webContents.send('server:error', { msg: 'rembg server did not start in time.' });
-    }
-  });
-}
-
-function stopServer() {
-  if (rembgProcess) {
-    rembgProcess.kill();
-    rembgProcess = null;
-  }
-}
-
-function pollPortOpen(port, maxMs) {
-  return new Promise((resolve) => {
-    const deadline = Date.now() + maxMs;
-    const tick = () => {
-      isPortOpen(port).then((open) => {
-        if (open) return resolve(true);
-        if (Date.now() >= deadline) return resolve(false);
-        setTimeout(tick, 500);
-      });
+    mkdirSync(MODELS_PATH(), { recursive: true });
+    const child = spawn(rembgExe, ['s', '--host', '127.0.0.1', '--port', String(SERVER_PORT), '--no-ui'], {
+      windowsHide: true,
+      env: { ...process.env, U2NET_HOME: MODELS_PATH(), BROWSER: 'nul' },
+    });
+    rembgProcess = child;
+    const controller = new AbortController();
+    startupController = controller;
+    publishServer({ running: true, starting: true, ready: false, error: null });
+    child.stdout.on('data', d => console.log('[rembg]', d.toString().trim()));
+    child.stderr.on('data', d => console.error('[rembg]', d.toString().trim()));
+    const failed = msg => {
+      if (rembgProcess !== child) return;
+      rembgProcess = null;
+      controller.abort();
+      publishServer({ running: false, ready: false, starting: false, error: msg });
     };
-    tick();
-  });
+    child.on('error', err => failed(err.message));
+    child.on('exit', code => failed('rembg server exited (code ' + code + ')'));
+    // Probe only during startup; process events own subsequent lifecycle state.
+    (async () => {
+      const deadline = Date.now() + 60000;
+      let error;
+      while (!controller.signal.aborted && Date.now() < deadline) {
+        try {
+          await checkReadiness('http://127.0.0.1:' + SERVER_PORT, controller.signal);
+          if (rembgProcess === child && !controller.signal.aborted) publishServer({ ready: true, starting: false, error: null });
+          return;
+        } catch (err) { error = err.message; }
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      if (rembgProcess === child && !controller.signal.aborted) {
+        publishServer({ ready: false, starting: false, error: 'rembg did not become ready: ' + error });
+      }
+    })();
+  }).catch(err => publishServer({ ready: false, starting: false, error: err.message }));
+  return serverOperation;
 }
 
-function isPortOpen(port) {
-  return new Promise((resolve) => {
-    const sock = new net.Socket();
-    sock.setTimeout(800);
-    sock.on('connect', () => { sock.destroy(); resolve(true); });
-    sock.on('error', () => { sock.destroy(); resolve(false); });
-    sock.on('timeout', () => { sock.destroy(); resolve(false); });
-    sock.connect(port, '127.0.0.1');
-  });
+async function stopServer() {
+  startupController?.abort();
+  const child = rembgProcess;
+  rembgProcess = null;
+  publishServer({ running: false, ready: false, starting: false });
+  if (child && child.exitCode === null && child.signalCode === null) {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Previous rembg process did not stop.')), 5000);
+      child.once('exit', () => { clearTimeout(timer); resolve(); });
+      child.once('error', () => { clearTimeout(timer); resolve(); });
+      child.kill();
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -152,7 +155,7 @@ function createWindow() {
   if (!isDev) Menu.setApplicationMenu(null);
 
   if (isDev) {
-    mainWindow.loadURL('http://localhost:5173');
+    mainWindow.loadURL('http://localhost:5180');
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
@@ -257,14 +260,11 @@ ipcMain.handle('model:check', (_, modelId) => {
 // IPC: Server
 // ---------------------------------------------------------------------------
 
-ipcMain.handle('server:status', () => ({
-  running: rembgProcess !== null,
-  port: SERVER_PORT,
-}));
+ipcMain.handle('server:status', () => serverState);
 
 ipcMain.handle('server:restart', async () => {
   const config = await loadConfig();
-  startServer(config);
+  await startServer(config);
   return { ok: true };
 });
 
@@ -274,7 +274,7 @@ ipcMain.handle('server:switch-backend', async (event, backend) => {
   };
 
   try {
-    stopServer();
+    await stopServer();
     const config = await loadConfig();
     const venvPath = config.venvPath || VENV_PATH();
 
@@ -282,11 +282,34 @@ ipcMain.handle('server:switch-backend', async (event, backend) => {
     await installRembg(venvPath, backend, (p) => send(p));
     await saveConfig({ backend });
 
-    startServer({ ...config, venvPath });
+    await startServer({ ...config, venvPath });
     return { success: true };
   } catch (err) {
     return { success: false, error: err.message };
   }
+});
+
+// Prepared PNG capabilities are scoped to the main window's top-level frame.
+let dragFiles;
+const dragPreparations = new Set();
+function trustedDragSender(event) {
+  return mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents
+    && event.senderFrame === mainWindow.webContents.mainFrame;
+}
+ipcMain.handle('result:prepare-drag', async (event, { name, buffer }) => {
+  if (!trustedDragSender(event)) throw new Error('Untrusted drag sender.');
+  const preparation = dragFiles.prepare(event.sender.id, name, buffer);
+  dragPreparations.add(preparation);
+  try { return await preparation; }
+  finally { dragPreparations.delete(preparation); }
+});
+ipcMain.on('result:start-drag', (event, token) => {
+  if (!trustedDragSender(event)) return;
+  try { dragFiles.start(event.sender.id, token, event.sender); }
+  catch (err) { console.error('Native drag failed:', err); }
+});
+ipcMain.on('result:release-drag', (event, token) => {
+  if (trustedDragSender(event)) dragFiles.release(event.sender.id, token);
 });
 
 // ---------------------------------------------------------------------------
@@ -328,6 +351,7 @@ ipcMain.handle('output:open-folder', (_, folder) => {
 // ---------------------------------------------------------------------------
 
 app.whenReady().then(async () => {
+  dragFiles = createDragFiles(app.getPath('temp'), nativeImage);
   createWindow();
   const config = await loadConfig();
   if (config.setupComplete && isRembgInstalled(config.venvPath || VENV_PATH())) {
@@ -336,7 +360,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  stopServer();
+  stopServer().catch(console.error);
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -344,4 +368,13 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-app.on('before-quit', () => stopServer());
+let quitting = false;
+app.on('before-quit', event => {
+  if (quitting) return;
+  event.preventDefault();
+  quitting = true;
+  Promise.allSettled([stopServer(), ...dragPreparations])
+    .then(() => dragFiles?.cleanup())
+    .catch(console.error)
+    .finally(() => app.quit());
+});

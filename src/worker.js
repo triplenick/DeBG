@@ -5,6 +5,8 @@
  * composites according to outputMode, and returns the final PNG.
  */
 
+import { foregroundBounds } from './crop.js';
+
 // ---------------------------------------------------------------------------
 // Morphological ops (separable max/min filter)
 // ---------------------------------------------------------------------------
@@ -142,12 +144,18 @@ async function applyPostProcess(maskFloat, imageBlob, width, height, settings) {
   const fgCtx = fg.getContext('2d');
   fgCtx.drawImage(srcBitmap, 0, 0);
   const pixels = fgCtx.getImageData(0, 0, width, height);
-  for (let i = 0; i < mask.length; i++) pixels.data[4 * i + 3] = Math.round(mask[i] * 255);
+  for (let i = 0; i < mask.length; i++) pixels.data[4 * i + 3] = Math.round(mask[i] * pixels.data[4 * i + 3]);
   fgCtx.putImageData(pixels, 0, 0);
   ctx.drawImage(fg, 0, 0);
 
   srcBitmap.close();
-  return canvas.convertToBlob({ type: 'image/png' });
+  const previewBlob = await canvas.convertToBlob({ type: 'image/png' });
+  if (outputMode !== 'transparent') return { resultBlob: previewBlob, previewBlob };
+  const bounds = foregroundBounds(pixels.data, width, height, feather);
+  if (bounds.width === width && bounds.height === height) return { resultBlob: previewBlob, previewBlob };
+  const cropped = new OffscreenCanvas(bounds.width, bounds.height);
+  cropped.getContext('2d').putImageData(pixels, -bounds.x, -bounds.y);
+  return { resultBlob: await cropped.convertToBlob({ type: 'image/png' }), previewBlob };
 }
 
 // ---------------------------------------------------------------------------
@@ -162,20 +170,24 @@ self.onmessage = async (event) => {
       // Initial processing: decode mask, apply post-process, store maskFloat
       const { id, maskBlob, imageBlob, width, height, settings } = payload;
       const maskFloat = await decodeMask(maskBlob, width, height);
-      const resultBlob = await applyPostProcess(maskFloat, imageBlob, width, height, settings);
-      self.postMessage({ stage: 'process-done', id, maskFloat, resultBlob });
+      const result = await applyPostProcess(maskFloat, imageBlob, width, height, settings);
+      self.postMessage({ stage: 'process-done', id, maskFloat, width, height, revision: payload.revision, ...result });
     }
 
     if (type === 'reprocess') {
       // Slider change: re-apply post-process to already-decoded masks
       const { items, settings } = payload;
       for (const { id, maskFloat, imageBlob, width, height } of items) {
-        const resultBlob = await applyPostProcess(maskFloat, imageBlob, width, height, settings);
-        self.postMessage({ stage: 'reprocess-done', id, resultBlob });
+        try {
+          const result = await applyPostProcess(maskFloat, imageBlob, width, height, settings);
+          self.postMessage({ stage: 'reprocess-done', id, revision: payload.revision, ...result });
+        } catch (err) {
+          self.postMessage({ stage: 'error', id, revision: payload.revision, error: err.message });
+        }
       }
-      self.postMessage({ stage: 'reprocess-batch-done' });
+      self.postMessage({ stage: 'reprocess-batch-done', revision: payload.revision });
     }
   } catch (err) {
-    self.postMessage({ stage: 'error', id: payload?.id, error: err?.message ?? String(err) });
+    self.postMessage({ stage: 'error', id: payload?.id, revision: payload?.revision, error: err?.message ?? String(err) });
   }
 };

@@ -22,6 +22,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveFile:               (folder, name, buffer) => ipcRenderer.invoke('output:save-file', { folder, filename: name, buffer }),
   openFolder:             (folder)               => ipcRenderer.invoke('output:open-folder', folder),
 
+  // --- Prepared native result files ---
+  prepareResultDrag: (name, buffer) => ipcRenderer.invoke('result:prepare-drag', { name, buffer }),
+  startResultDrag: token => ipcRenderer.send('result:start-drag', token),
+  releaseResultDrag: token => ipcRenderer.send('result:release-drag', token),
+
   // --- Server ---
   getServerStatus: () => ipcRenderer.invoke('server:status'),
   restartServer: () => ipcRenderer.invoke('server:restart'),
@@ -32,11 +37,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cleanupSwitchListener: () => ipcRenderer.removeAllListeners('switch:progress'),
 
   // --- Events (main → renderer) ---
-  onServerReady: (cb) => ipcRenderer.on('server:ready', (_, d) => cb(d)),
-  onServerError: (cb) => ipcRenderer.on('server:error', (_, d) => cb(d)),
-  removeServerListeners: () => {
-    ipcRenderer.removeAllListeners('server:ready');
-    ipcRenderer.removeAllListeners('server:error');
+  onServerState: cb => {
+    const listener = (_, state) => cb(state);
+    ipcRenderer.on('server:state', listener);
+    return () => ipcRenderer.removeListener('server:state', listener);
   },
 
   platform: process.platform,

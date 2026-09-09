@@ -135,6 +135,12 @@ export default function App() {
   const workerRef      = useRef(null);
   const itemsRef       = useRef(items);    itemsRef.current    = items;
   const settingsRef    = useRef(settings); settingsRef.current = settings;
+  const revisionRef = useRef(0);
+  const updateItems = useCallback(transform => {
+    const next = typeof transform === 'function' ? transform(itemsRef.current) : transform;
+    itemsRef.current = next;
+    setItems(next);
+  }, []);
   const reprocessTimer = useRef(null);
   const dropRef        = useRef(null);
   const cancelRef      = useRef(false);
@@ -145,7 +151,7 @@ export default function App() {
 
   const pending    = useMemo(() => items.filter(it => it.status === 'queued' || it.status === 'processing'), [items]);
   const done       = useMemo(() => items.filter(it => it.status === 'done'), [items]);
-  const isBusy     = status.phase === 'processing';
+  const isBusy     = status.phase === 'processing' || items.some(it => it.status === 'processing' || it.status === 'applying');
   const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   const safePage   = Math.min(page, totalPages - 1);
 
@@ -192,92 +198,109 @@ export default function App() {
     const w = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
     workerRef.current = w;
 
-    w.onmessage = ({ data: msg }) => {
-      switch (msg.stage) {
-        case 'process-done': {
-          const url  = URL.createObjectURL(msg.resultBlob);
-          const item = itemsRef.current.find(it => it.id === msg.id);
-          setItems(prev => prev.map(it => it.id === msg.id
-            ? { ...it, status: 'done', maskFloat: msg.maskFloat, resultBlob: msg.resultBlob, resultUrl: url }
-            : it));
-          // Auto-save to output folder if one is configured
-          if (outputFolderRef.current && window.electronAPI && item) {
-            const filename = `${baseName(item.name)}.png`;
-            msg.resultBlob.arrayBuffer().then(buf =>
-              window.electronAPI.saveFile(outputFolderRef.current, filename, buf)
-                .then(() => setSavedCount(n => n + 1))
-                .catch(err => console.error('Auto-save failed:', err))
-            );
-          }
-          break;
+    let disposed = false;
+    w.onmessage = async ({ data: msg }) => {
+      const item = itemsRef.current.find(it => it.id === msg.id);
+      if (msg.stage === 'process-done' && item) {
+        updateItems(prev => prev.map(it => it.id === msg.id ? {
+          ...it, maskFloat: msg.maskFloat, origWidth: msg.width, origHeight: msg.height,
+        } : it));
+        if (msg.revision !== revisionRef.current) {
+          w.postMessage({ type: 'reprocess', payload: {
+            items: [{ id: item.id, maskFloat: msg.maskFloat, imageBlob: item.file, width: msg.width, height: msg.height }],
+            settings: settingsRef.current, revision: revisionRef.current,
+          } });
+          return;
         }
-        case 'reprocess-done': {
-          const url = URL.createObjectURL(msg.resultBlob);
-          setItems(prev => prev.map(it => it.id === msg.id
-            ? { ...it, status: 'done', resultBlob: msg.resultBlob, resultUrl: url }
-            : it));
-          break;
+      }
+      if (msg.revision !== revisionRef.current || disposed) return;
+      if (msg.stage === 'process-done' || msg.stage === 'reprocess-done') {
+        if (!item) return;
+        let dragToken = null, dragError = null;
+        try {
+          if (window.electronAPI) dragToken = await window.electronAPI.prepareResultDrag(
+            baseName(item.name) + '.png', await msg.resultBlob.arrayBuffer());
+        } catch (err) { dragError = err.message; }
+        const current = itemsRef.current.find(it => it.id === msg.id);
+        if (disposed || !current || msg.revision !== revisionRef.current) {
+          if (dragToken) window.electronAPI.releaseResultDrag(dragToken);
+          return;
         }
-        case 'reprocess-batch-done':
-          setStatus({ phase: 'done', msg: 'Settings applied.' });
-          break;
-        case 'error':
-          setItems(prev => prev.map(it => it.id === msg.id
-            ? { ...it, status: 'error', error: msg.error }
-            : it));
-          break;
+        if (current.resultUrl) URL.revokeObjectURL(current.resultUrl);
+        if (current.previewUrl) URL.revokeObjectURL(current.previewUrl);
+        if (current.dragToken) window.electronAPI?.releaseResultDrag(current.dragToken);
+        updateItems(prev => prev.map(it => it.id === msg.id ? {
+          ...it, status: 'done', resultBlob: msg.resultBlob,
+          resultUrl: URL.createObjectURL(msg.resultBlob), previewUrl: URL.createObjectURL(msg.previewBlob),
+          dragToken, dragError, revision: msg.revision,
+        } : it));
+        if (dragError) setStatus({ phase: 'error', msg: 'PNG ready, but preparing drag failed: ' + dragError });
+        if (msg.stage === 'process-done' && outputFolderRef.current && window.electronAPI) {
+          try {
+            await window.electronAPI.saveFile(outputFolderRef.current, baseName(item.name) + '.png', await msg.resultBlob.arrayBuffer());
+            if (!disposed) setSavedCount(n => n + 1);
+          } catch (err) { console.error('Auto-save failed:', err); }
+        }
+      } else if (msg.stage === 'reprocess-batch-done') {
+        setStatus({ phase: 'done', msg: 'Settings applied.' });
+      } else if (msg.stage === 'error' && item) {
+        updateItems(prev => prev.map(it => it.id === msg.id ? { ...it, status: 'error', error: msg.error } : it));
       }
     };
 
-    return () => { w.terminate(); workerRef.current = null; };
+    return () => { disposed = true; clearTimeout(reprocessTimer.current); w.terminate(); workerRef.current = null; };
   }, []);
 
   useEffect(() => () => {
     itemsRef.current.forEach(it => {
       if (it.sourceUrl) URL.revokeObjectURL(it.sourceUrl);
       if (it.resultUrl) URL.revokeObjectURL(it.resultUrl);
+      if (it.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      if (it.dragToken) window.electronAPI?.releaseResultDrag(it.dragToken);
     });
   }, []);
 
   // -------------------------------------------------------------------------
-  // Server health polling
+  // Main-process readiness events (HTTP fallback for browser development)
   // -------------------------------------------------------------------------
 
   useEffect(() => {
-    // In browser dev mode there is no startup phase
-    if (!window.electronAPI) setServerStarting(false);
-
-    const markReady = () => { setServerOk(true); setServerStarting(false); };
-    const markError = () => { setServerOk(false); setServerStarting(false); };
-
-    const check = async () => {
-      try {
-        await fetch(`${SERVER_URL}/`, { signal: AbortSignal.timeout(2000) });
-        markReady();
-      } catch {
-        setServerOk(false);
-      }
+    let disposed = false, timer, unsubscribe;
+    let lastRevision = -1;
+    const applyState = state => {
+      if (disposed || state.revision < lastRevision) return;
+      lastRevision = state.revision;
+      setServerOk(state.ready);
+      setServerStarting(state.starting);
+      if (state.error) setStatus({ phase: 'error', msg: state.error });
     };
-
     if (window.electronAPI) {
-      window.electronAPI.onServerReady(markReady);
-      window.electronAPI.onServerError(markError);
+      unsubscribe = window.electronAPI.onServerState(applyState);
+      window.electronAPI.getServerStatus().then(applyState).catch(err => {
+        if (!disposed) { setServerStarting(false); setStatus({ phase: 'error', msg: err.message }); }
+      });
       window.electronAPI.getConfig().then(c => {
+        if (disposed) return;
         setConfig(c || {});
         if (c?.outputFolder) setOutputFolder(c.outputFolder);
       });
+    } else {
+      setServerStarting(false);
+      const check = async () => {
+        let ready = false;
+        try {
+          const response = await fetch(SERVER_URL + '/openapi.json', { signal: AbortSignal.timeout(2000) });
+          if (response.ok) {
+            const schema = await response.json();
+            ready = schema.info?.title === 'Rembg' && !!schema.paths?.['/api/remove']?.post;
+          }
+        } catch { /* No main process in browser development mode. */ }
+        if (!disposed) { setServerOk(ready); timer = setTimeout(check, 6000); }
+      };
+      check();
     }
-
-    // After 45 s without connecting, show a "still loading" sub-message
-    const slowTimer = setTimeout(() => setStartupSlow(true), 45_000);
-
-    check();
-    const id = setInterval(check, 6000);
-    return () => {
-      clearInterval(id);
-      clearTimeout(slowTimer);
-      window.electronAPI?.removeServerListeners();
-    };
+    const slowTimer = setTimeout(() => setStartupSlow(true), 45000);
+    return () => { disposed = true; clearTimeout(timer); clearTimeout(slowTimer); unsubscribe?.(); };
   }, []);
 
   // -------------------------------------------------------------------------
@@ -287,7 +310,7 @@ export default function App() {
   const addFiles = useCallback((fileList) => {
     const files = Array.from(fileList).filter(f => ACCEPTED.includes(f.type));
     if (!files.length) return;
-    setItems(prev => [...prev, ...files.map(file => ({
+    updateItems(prev => [...prev, ...files.map(file => ({
       id: uid(), name: file.name, file,
       sourceUrl: URL.createObjectURL(file),
       status: 'queued', maskFloat: null,
@@ -318,29 +341,30 @@ export default function App() {
   // -------------------------------------------------------------------------
 
   const triggerReprocess = useCallback((next) => {
+    const revision = ++revisionRef.current;
+    updateItems(prev => prev.map(it => it.maskFloat ? { ...it, status: 'applying' } : it));
     clearTimeout(reprocessTimer.current);
     reprocessTimer.current = setTimeout(() => {
       if (!workerRef.current) return;
-      const doneItems = itemsRef.current.filter(it => it.maskFloat && it.status === 'done');
+      const doneItems = itemsRef.current.filter(it => it.maskFloat);
       if (!doneItems.length) return;
-      setItems(prev => prev.map(it => it.maskFloat && it.status === 'done' ? { ...it, status: 'applying' } : it));
+      updateItems(prev => prev.map(it => it.maskFloat && it.status === 'done' ? { ...it, status: 'applying' } : it));
       setStatus({ phase: 'processing', msg: 'Applying settings…' });
       workerRef.current.postMessage({
         type: 'reprocess',
         payload: {
           items: doneItems.map(it => ({ id: it.id, maskFloat: it.maskFloat, imageBlob: it.file, width: it.origWidth, height: it.origHeight })),
-          settings: next,
+          settings: next, revision,
         },
       });
     }, 320);
   }, []);
 
   const updateSetting = useCallback((key, value) => {
-    setSettings(prev => {
-      const next = { ...prev, [key]: value };
-      triggerReprocess(next);
-      return next;
-    });
+    const next = { ...settingsRef.current, [key]: value };
+    settingsRef.current = next;
+    setSettings(next);
+    triggerReprocess(next);
   }, [triggerReprocess]);
 
   // -------------------------------------------------------------------------
@@ -359,12 +383,12 @@ export default function App() {
 
     for (let i = 0; i < queued.length; i++) {
       if (cancelRef.current) {
-        setItems(prev => prev.map(it => it.status === 'processing' ? { ...it, status: 'queued' } : it));
+        updateItems(prev => prev.map(it => it.status === 'processing' ? { ...it, status: 'queued' } : it));
         setStatus({ phase: 'idle', msg: 'Cancelled.' });
         break;
       }
       const item = queued[i];
-      setItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'processing' } : it));
+      updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'processing' } : it));
       setStatus({ phase: 'processing', msg: `${i + 1} / ${queued.length}: ${item.name}` });
 
       try {
@@ -385,24 +409,21 @@ export default function App() {
             if (msg.id !== item.id) return;
             if (msg.stage === 'process-done' || msg.stage === 'error') {
               workerRef.current.removeEventListener?.('message', handler);
-              workerRef.current.onmessage = workerRef.current._origHandler;
               msg.stage === 'error' ? reject(new Error(msg.error)) : resolve();
             }
           };
-          const origHandler = workerRef.current.onmessage;
-          workerRef.current._origHandler = origHandler;
           workerRef.current.addEventListener('message', handler);
 
           workerRef.current.postMessage({
             type: 'process',
-            payload: { id: item.id, maskBlob, imageBlob: item.file, width, height, settings: settingsRef.current },
+            payload: { id: item.id, maskBlob, imageBlob: item.file, width, height, settings: settingsRef.current, revision: revisionRef.current },
           });
         });
 
-        setItems(prev => prev.map(it => it.id === item.id ? { ...it, origWidth: width, origHeight: height } : it));
+        updateItems(prev => prev.map(it => it.id === item.id ? { ...it, origWidth: width, origHeight: height } : it));
       } catch (err) {
         setModelDownloading(false);
-        setItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'error', error: err.message } : it));
+        updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'error', error: err.message } : it));
       }
     }
 
@@ -449,20 +470,25 @@ export default function App() {
   // -------------------------------------------------------------------------
 
   const removeItem = id => {
-    setItems(prev => {
+    updateItems(prev => {
       const v = prev.find(it => it.id === id);
       if (v?.sourceUrl) URL.revokeObjectURL(v.sourceUrl);
       if (v?.resultUrl) URL.revokeObjectURL(v.resultUrl);
+      if (v?.previewUrl) URL.revokeObjectURL(v.previewUrl);
+      if (v?.dragToken) window.electronAPI?.releaseResultDrag(v.dragToken);
       return prev.filter(it => it.id !== id);
     });
   };
 
   const clearAll = () => {
+    clearTimeout(reprocessTimer.current);
     items.forEach(it => {
       URL.revokeObjectURL(it.sourceUrl);
       if (it.resultUrl) URL.revokeObjectURL(it.resultUrl);
+      if (it.previewUrl) URL.revokeObjectURL(it.previewUrl);
+      if (it.dragToken) window.electronAPI?.releaseResultDrag(it.dragToken);
     });
-    setItems([]);
+    updateItems([]);
     setPage(0);
     setLightboxId(null);
     setSavedCount(0);
@@ -504,7 +530,7 @@ export default function App() {
   };
 
   const downloadSingle = it => {
-    if (it.resultBlob) saveAs(it.resultBlob, `${baseName(it.name)}.png`);
+    if (it.status === 'done' && it.revision === revisionRef.current && it.resultBlob) saveAs(it.resultBlob, `${baseName(it.name)}.png`);
   };
 
   // -------------------------------------------------------------------------
@@ -520,7 +546,6 @@ export default function App() {
     if (result.success) {
       setConfig(c => ({ ...c, backend: newBackend }));
       setShowSwitch(false);
-      setServerOk(false);
     } else {
       setSwitchLog(l => [...l, `Error: ${result.error}`]);
     }
@@ -538,6 +563,20 @@ export default function App() {
   // -------------------------------------------------------------------------
   // Render helpers
   // -------------------------------------------------------------------------
+
+  const dragProps = it => {
+    const ready = !!window.electronAPI && it.status === 'done' && !!it.dragToken && it.revision === revisionRef.current;
+    return {
+      draggable: ready,
+      'data-result-draggable': ready,
+      title: ready ? 'Drag PNG to another app · Click to compare' : it.dragError || 'Result is being prepared',
+      onDragStart: event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (ready && it.revision === revisionRef.current) window.electronAPI.startResultDrag(it.dragToken);
+      },
+    };
+  };
 
   const morphLabel = settings.morphSize === 0 ? '0'
     : settings.morphSize > 0 ? `+${settings.morphSize} expand` : `${settings.morphSize} shrink`;
@@ -769,7 +808,7 @@ export default function App() {
           <div className="gallery-toolbar">
             <span className="gallery-count">
               {items.length} image{items.length !== 1 ? 's' : ''}
-              {done.length > 0 && <> · <span className="count-done">{done.length} done</span></>}
+              {done.length > 0 && <> · <span className="count-done">{done.length} done</span>{window.electronAPI && ' · Drag results to another app'}</>}
             </span>
             <div className="view-toggle">
               <button
@@ -822,7 +861,7 @@ export default function App() {
                       <img src={it.sourceUrl} className="list-thumb" alt="" />
                       <div className={`list-thumb-result ${it.resultUrl ? 'thumb-checker' : ''}`}>
                         {it.resultUrl ? (
-                          <img src={it.resultUrl} className="list-thumb" alt="" />
+                          <img src={it.resultUrl} className="list-thumb" alt="" {...dragProps(it)} />
                         ) : it.status === 'processing' ? (
                           <div className="list-spinner"><div className="spinner sm" /></div>
                         ) : (
@@ -853,7 +892,7 @@ export default function App() {
                     onClick={() => openLightbox(it.id)} title={it.name}>
                     <div className="small-thumb thumb-checker">
                       {it.resultUrl ? (
-                        <img src={it.resultUrl} alt={it.name} />
+                        <img src={it.resultUrl} alt={it.name} {...dragProps(it)} />
                       ) : it.status === 'processing' ? (
                         <div className="placeholder">
                           <div className="spinner" />
@@ -882,7 +921,7 @@ export default function App() {
                     <div className="thumb thumb-checker">
                       {it.resultUrl ? (
                         <>
-                          <img src={it.resultUrl} alt="result" />
+                          <img src={it.resultUrl} alt="result" {...dragProps(it)} />
                           {it.status === 'applying' && (
                             <div className="applying-overlay"><div className="spinner" /></div>
                           )}
@@ -897,7 +936,7 @@ export default function App() {
                       ) : (
                         <div className="placeholder muted">Pending</div>
                       )}
-                      <span className="tag">Result</span>
+                      <span className="tag">{it.status === 'done' && it.dragToken ? 'Result · Drag PNG ↗' : 'Result'}</span>
                     </div>
                   </div>
                   <div className="card-meta">
@@ -945,7 +984,10 @@ export default function App() {
               </div>
 
               <div className="lightbox-actions">
-                {lightboxItem.resultBlob && (
+                {lightboxItem.dragToken && lightboxItem.status === 'done' && (
+                  <span className="btn btn-link" {...dragProps(lightboxItem)}>Drag PNG ↗</span>
+                )}
+                {lightboxItem.status === 'done' && lightboxItem.resultBlob && (
                   <button className="btn btn-link" onClick={() => downloadSingle(lightboxItem)}>↓ PNG</button>
                 )}
                 <button className="lb-close" onClick={() => setLightboxId(null)}>✕</button>
@@ -955,7 +997,7 @@ export default function App() {
             {lightboxItem.resultUrl ? (
               <CompareSlider
                 original={lightboxItem.sourceUrl}
-                result={lightboxItem.resultUrl}
+                result={lightboxItem.previewUrl || lightboxItem.resultUrl}
               />
             ) : (
               <div className="lb-original-only">
