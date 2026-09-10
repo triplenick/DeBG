@@ -97,7 +97,11 @@ test('server readiness and exit events cannot be overwritten by a previous proce
     fs: { existsSync: () => true, mkdirSync() {}, promises: {} },
     './setup-helpers.cjs': { getRembgExe: () => 'test-rembg' },
     './server-health.cjs': { checkReadiness: () => new Promise(resolve => probes.push(resolve)) },
-    child_process: { spawn: () => {
+    child_process: { spawn: (exe, args) => {
+      assert.equal(path.basename(exe), 'python.exe');
+      assert.equal(args[0], '-u');
+      assert.equal(path.basename(args[1]), 'rembg-server.py');
+      assert.equal(args[2], 's');
       const child = new EventEmitter();
       child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
       child.exitCode = null; child.signalCode = null;

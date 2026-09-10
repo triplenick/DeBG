@@ -78,7 +78,11 @@ function startServer(config) {
       return;
     }
     mkdirSync(MODELS_PATH(), { recursive: true });
-    const child = spawn(rembgExe, ['s', '--host', '127.0.0.1', '--port', String(SERVER_PORT), '--no-ui'], {
+    const pythonExe = path.join(path.dirname(rembgExe), 'python.exe');
+    // Python cannot read Electron's virtual app.asar filesystem.
+    const launcher = isDev ? path.join(__dirname, 'rembg-server.py')
+      : path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'rembg-server.py');
+    const child = spawn(pythonExe, ['-u', launcher, 's', '--host', '127.0.0.1', '--port', String(SERVER_PORT), '--no-ui'], {
       windowsHide: true,
       env: { ...process.env, U2NET_HOME: MODELS_PATH(), BROWSER: 'nul' },
     });

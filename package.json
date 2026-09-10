@@ -43,6 +43,7 @@
       "electron/**/*",
       "package.json"
     ],
+    "asarUnpack": ["electron/rembg-server.py"],
     "win": {
       "target": [
         { "target": "portable", "arch": ["x64"] },

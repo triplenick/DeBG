@@ -174,6 +174,10 @@ Electron validates rembg's successful OpenAPI response and background-removal ro
 
 ### Workflow checks
 
+For GPU startup, DeBG uses its own venv Python to preload matching pip-installed NVIDIA runtime DLLs through `onnxruntime.preload_dlls(directory="")` before starting rembg. A CUDA provider appearing in `get_available_providers()` does not prove it can load. For example, ONNX Runtime 1.29's CUDA 13 build needs CUDA 13 libraries; a system CUDA 12 toolkit cannot supply those DLLs. The launcher leaves global PATH and CUDA_PATH unchanged. It also prevents rembg from opening its standalone browser UI.
+
+To verify actual GPU execution with an already-cached model, run the venv Python with `-B tests/check-cuda.py <absolute-path-to-model.onnx>`. This performs one inference and checks the profiler for CUDA kernels, without downloading models or installing packages.
+
 Run the focused tests with Node 20+:
 
 ```powershell
