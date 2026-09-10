@@ -13,6 +13,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getConfig: () => ipcRenderer.invoke('config:get'),
   saveConfig: (patch) => ipcRenderer.invoke('config:save', patch),
 
+  setAlwaysOnTop: value => ipcRenderer.invoke('window:set-always-on-top', value),
+
   // --- Models ---
   checkModelCached: (modelId) => ipcRenderer.invoke('model:check', modelId),
 

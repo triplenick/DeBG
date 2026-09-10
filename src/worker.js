@@ -150,7 +150,7 @@ async function applyPostProcess(maskFloat, imageBlob, width, height, settings) {
 
   srcBitmap.close();
   const previewBlob = await canvas.convertToBlob({ type: 'image/png' });
-  if (outputMode !== 'transparent') return { resultBlob: previewBlob, previewBlob };
+  if (outputMode !== 'transparent' || settings.autoCrop === false) return { resultBlob: previewBlob, previewBlob };
   const bounds = foregroundBounds(pixels.data, width, height, feather);
   if (bounds.width === width && bounds.height === height) return { resultBlob: previewBlob, previewBlob };
   const cropped = new OffscreenCanvas(bounds.width, bounds.height);

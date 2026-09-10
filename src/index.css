@@ -40,3 +40,6 @@ code {
   border-radius: 6px;
   font-size: 0.9em;
 }
+
+:root { --bg: #141716; --panel: #1c201e; --panel-2: #252b27; --border: #363e38; --text: #e8ece9; --muted: #a1aaa4; --accent: #b5d5c5; --accent-2: #b5d5c5; }
+html, body, #root { background: var(--bg); }

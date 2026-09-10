@@ -40,6 +40,7 @@ app.whenReady().then(async () => {
       try {
         const first = await send('process', { id: 'product', maskBlob, imageBlob: source, width: 100, height: 80, settings: { threshold: 0 }, revision: 1 });
         const item = { id: 'product', maskFloat: first.maskFloat, imageBlob: source, width: 100, height: 80 };
+        const uncropped = await send('reprocess', { items: [item], settings: { threshold: 0, autoCrop: false }, revision: 2 });
         const shrink = await send('reprocess', { items: [item], settings: { threshold: 0, morphSize: -3 }, revision: 2 });
         const feather = await send('reprocess', { items: [item], settings: { threshold: 0, feather: 3 }, revision: 3 });
         const color = await send('reprocess', { items: [item], settings: { threshold: 0, outputMode: 'color' }, revision: 4 });
@@ -47,10 +48,11 @@ app.whenReady().then(async () => {
         ctx.clearRect(0, 0, 100, 80);
         const transparentSource = await canvas.convertToBlob();
         const alpha = await send('reprocess', { items: [{ ...item, imageBlob: transparentSource }], settings: { threshold: 0 }, revision: 6 });
-        return { first: await inspect(first.resultBlob), preview: await inspect(first.previewBlob), shrink: await inspect(shrink.resultBlob), feather: await inspect(feather.resultBlob), color: await inspect(color.resultBlob), empty: await inspect(empty.resultBlob), alpha: await inspect(alpha.resultBlob), revision: shrink.revision, bytes: Array.from(new Uint8Array(await shrink.resultBlob.arrayBuffer())) };
+        return { uncropped: await inspect(uncropped.resultBlob), first: await inspect(first.resultBlob), preview: await inspect(first.previewBlob), shrink: await inspect(shrink.resultBlob), feather: await inspect(feather.resultBlob), color: await inspect(color.resultBlob), empty: await inspect(empty.resultBlob), alpha: await inspect(alpha.resultBlob), revision: shrink.revision, bytes: Array.from(new Uint8Array(await shrink.resultBlob.arrayBuffer())) };
       } finally { worker.terminate(); }
     })()`);
     assert.deepEqual([results.first.width, results.first.height], [24, 34]);
+    assert.deepEqual([results.uncropped.width, results.uncropped.height, results.uncropped.nonzero], [100, 80, 600]);
     assert.deepEqual(results.first.center, [255, 0, 0, 255]);
     assert.equal(results.first.nonzero, 600);
     assert.deepEqual([results.preview.width, results.preview.height], [100, 80]);

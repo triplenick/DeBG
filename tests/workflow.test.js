@@ -132,3 +132,22 @@ test('server readiness and exit events cannot be overwritten by a previous proce
   assert.equal(lifecycle.state().running, false);
   assert.match(lifecycle.state().error, /exited/);
 });
+
+// Both rembg cache layouts, without accepting directories or partial downloads.
+test('model cache recognizes nested and legacy files precisely', async () => {
+  const { isModelCached } = (await import('../electron/model-cache.cjs')).default;
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'debg-cache-test-'));
+  try {
+    await mkdir(path.join(root, 'models', 'bria-rmbg'), { recursive: true });
+    assert.equal(isModelCached(root, 'bria-rmbg'), false);
+    await writeFile(path.join(root, 'models', 'bria-rmbg', 'bria-rmbg.onnx'), 'model');
+    assert.equal(isModelCached(root, 'bria-rmbg'), true);
+    await writeFile(path.join(root, 'u2netp.onnx'), 'model');
+    assert.equal(isModelCached(root, 'u2netp'), true);
+    assert.equal(isModelCached(root, 'u2net'), false);
+    await writeFile(path.join(root, 'u2net.onnx'), '');
+    assert.equal(isModelCached(root, 'u2net'), false);
+    assert.equal(isModelCached(root, '../bria-rmbg'), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

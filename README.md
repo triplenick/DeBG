@@ -187,3 +187,15 @@ npm run build
 ```
 
 The Electron check runs a hidden window and verifies the actual worker's PNG output and native PNG preparation. For a manual Windows smoke test, leave the output folder unset, process an image, and drag it into both Explorer and a Chrome file-upload drop target. Repeat after rapidly changing threshold, feather, and shrink/expand; the dropped PNG should match the latest gallery result. Also test duplicate filenames and removal of an item after dropping it. External targets must support file drops.
+
+### Compact packshot workflow
+
+Model/output controls and image settings start collapsed. Auto-crop is enabled by default; toggle it in Image settings to restore the original transparent canvas, including for existing results. New drops appear first in the gallery. Enable **Process automatically on drop** to process queued images as soon as the server is ready; this preference is remembered. Drops received during processing are queued sequentially. **Stop after current** disables automatic processing and leaves remaining images queued.
+
+The processing button and status stay at the bottom of the window. The desktop window can be narrowed to 360 px, and **Keep on top** pins it above other apps for dropping images in and dragging PNGs out.
+
+Model detection supports both rembg's flat and nested cache layouts. A missing cache is described as preparation that may require a download, rather than asserting download activity or an outdated size.
+
+BRIA CUDA sessions use heuristic convolution selection, a bounded cuDNN workspace, and exact-sized arena growth to reduce GPU memory pressure. Model precision and image dimensions are unchanged. The rembg server still owns session reuse. See [ONNX Runtime CUDA options](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html). Run `tests/benchmark-bria.py` with the DeBG venv Python to measure three passes on the locally cached BRIA model. Timing depends on hardware and other GPU workloads. Renderer console timing separates backend request time from PNG finishing.
+
+Additional UI check: `node_modules/electron/dist/electron.exe tests/electron-ui.cjs` (run a production build first). This uses synthetic masks to check manual/automatic queue behavior, arrivals during processing, newest-first order, collapsed sections, and narrow layout without invoking inference.

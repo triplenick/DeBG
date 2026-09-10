@@ -3,7 +3,7 @@ const path = require('path');
 const { checkReadiness } = require('./server-health.cjs');
 const { createDragFiles } = require('./drag-files.cjs');
 const { spawn } = require('child_process');
-const { existsSync, mkdirSync, readdirSync } = require('fs');
+const { existsSync, mkdirSync } = require('fs');
 const { readFile, writeFile, mkdir } = require('fs').promises;
 const {
   findPython,
@@ -143,8 +143,8 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 900,
-    minWidth: 820,
-    minHeight: 580,
+    minWidth: 360,
+    minHeight: 460,
     title: 'DeBG',
     backgroundColor: '#0b0d12',
     autoHideMenuBar: true,
@@ -236,33 +236,18 @@ ipcMain.handle('config:save', async (_, patch) => saveConfig(patch));
 // IPC: Model cache check
 // ---------------------------------------------------------------------------
 
-// Patterns to detect each model's file in U2NET_HOME (case-insensitive).
-// u2net needs an exact match so it doesn't false-positive on u2netp / u2net_human_seg.
-const MODEL_PATTERNS = {
-  'birefnet-general':  /birefnet.general/i,
-  'birefnet-portrait': /birefnet.portrait/i,
-  'bria-rmbg':         /rmbg/i,
-  'isnet-general-use': /isnet.general.use/i,
-  'isnet-anime':       /isnet.anime/i,
-  'u2net_human_seg':   /u2net_human_seg/i,
-  'silueta':           /silueta/i,
-  'u2netp':            /u2netp/i,
-  'u2net':             /^u2net\.onnx$/i,
-};
-
-ipcMain.handle('model:check', (_, modelId) => {
-  const dir = MODELS_PATH();
-  if (!existsSync(dir)) return false;
-  try {
-    const pat = MODEL_PATTERNS[modelId];
-    if (!pat) return false;
-    return readdirSync(dir).some(f => pat.test(f));
-  } catch { return false; }
-});
+const { isModelCached } = require('./model-cache.cjs');
+ipcMain.handle('model:check', (_, modelId) => isModelCached(MODELS_PATH(), modelId));
 
 // ---------------------------------------------------------------------------
 // IPC: Server
 // ---------------------------------------------------------------------------
+
+ipcMain.handle('window:set-always-on-top', (event, value) => {
+  if (event.sender !== mainWindow?.webContents || event.senderFrame !== mainWindow.webContents.mainFrame || typeof value !== 'boolean') throw new Error('Invalid window request');
+  mainWindow.setAlwaysOnTop(value);
+  return mainWindow.isAlwaysOnTop();
+});
 
 ipcMain.handle('server:status', () => serverState);
 

@@ -12,15 +12,15 @@ const SERVER_URL  = `http://127.0.0.1:${SERVER_PORT}`;
 const PAGE_SIZE   = 24;
 
 const MODELS = [
-  { id: 'birefnet-general',   label: 'BiRefNet General',  hint: 'Best quality, any subject',         dl: '~375 MB' },
-  { id: 'birefnet-portrait',  label: 'BiRefNet Portrait', hint: 'Best for people & hair',            dl: '~375 MB' },
-  { id: 'bria-rmbg',          label: 'BRIA RMBG',         hint: 'E-commerce / advertising quality',  dl: '~176 MB' },
-  { id: 'isnet-general-use',  label: 'ISNet General',     hint: 'Fast + high accuracy',              dl: '~176 MB' },
-  { id: 'u2net',              label: 'U²Net',             hint: 'Classic general-purpose',           dl: '~176 MB' },
-  { id: 'u2net_human_seg',    label: 'U²Net Human',       hint: 'Specialized for people',            dl: '~176 MB' },
-  { id: 'silueta',            label: 'Silueta',           hint: 'Compact & fast (43 MB)',            dl: '~43 MB'  },
-  { id: 'isnet-anime',        label: 'ISNet Anime',       hint: 'Anime & illustrations',             dl: '~176 MB' },
-  { id: 'u2netp',             label: 'U²Net Lite',        hint: 'Smallest, fastest inference',       dl: '~4.7 MB' },
+  { id: 'birefnet-general',   label: 'BiRefNet General',  hint: 'Best quality, any subject' },
+  { id: 'birefnet-portrait',  label: 'BiRefNet Portrait', hint: 'Best for people & hair' },
+  { id: 'bria-rmbg',          label: 'BRIA RMBG',         hint: 'E-commerce / advertising quality' },
+  { id: 'isnet-general-use',  label: 'ISNet General',     hint: 'Fast + high accuracy' },
+  { id: 'u2net',              label: 'U²Net',             hint: 'Classic general-purpose' },
+  { id: 'u2net_human_seg',    label: 'U²Net Human',       hint: 'Specialized for people' },
+  { id: 'silueta',            label: 'Silueta',           hint: 'Compact & fast (43 MB)'  },
+  { id: 'isnet-anime',        label: 'ISNet Anime',       hint: 'Anime & illustrations' },
+  { id: 'u2netp',             label: 'U²Net Lite',        hint: 'Smallest, fastest inference' },
 ];
 
 const ACCEPTED = ['image/png', 'image/jpeg', 'image/webp', 'image/bmp'];
@@ -32,6 +32,7 @@ const DEFAULT_SETTINGS = {
   outputMode: 'transparent',
   bgColor:    '#ffffff',
   alphaMatte: false,
+  autoCrop: true,
 };
 
 function uid()       { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
@@ -108,6 +109,9 @@ function CompareSlider({ original, result }) {
 // ---------------------------------------------------------------------------
 
 export default function App() {
+  const [autoProcess, setAutoProcess] = useState(() => localStorage.getItem('debg.autoProcess') === 'true');
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const batchRunning = useRef(false);
   const [model,    setModel]    = useState('birefnet-general');
   const [items,    setItems]    = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -310,13 +314,14 @@ export default function App() {
   const addFiles = useCallback((fileList) => {
     const files = Array.from(fileList).filter(f => ACCEPTED.includes(f.type));
     if (!files.length) return;
-    updateItems(prev => [...prev, ...files.map(file => ({
+    setPage(0);
+    updateItems(prev => [...files.map(file => ({
       id: uid(), name: file.name, file,
       sourceUrl: URL.createObjectURL(file),
       status: 'queued', maskFloat: null,
       origWidth: 0, origHeight: 0,
       resultBlob: null, resultUrl: null, error: null,
-    }))]);
+    })), ...prev]);
   }, []);
 
   useEffect(() => {
@@ -373,9 +378,11 @@ export default function App() {
 
   const processAll = async () => {
     if (!serverOk) { setStatus({ phase: 'error', msg: 'Server not connected. Wait for it to start or click Reconnect.' }); return; }
-    const queued = items.filter(it => it.status === 'queued');
+    if (batchRunning.current) return;
+    const queued = itemsRef.current.filter(it => it.status === 'queued').reverse();
     if (!queued.length) return;
 
+    batchRunning.current = true;
     cancelRef.current = false;
     setStatus({ phase: 'processing', msg: `Processing 0 / ${queued.length}…` });
 
@@ -388,6 +395,7 @@ export default function App() {
         break;
       }
       const item = queued[i];
+      if (!itemsRef.current.some(it => it.id === item.id)) continue;
       updateItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'processing' } : it));
       setStatus({ phase: 'processing', msg: `${i + 1} / ${queued.length}: ${item.name}` });
 
@@ -398,11 +406,14 @@ export default function App() {
 
         if (!isCached) {
           setModelDownloading(true);
-          setStatus({ phase: 'processing', msg: `Downloading ${modelInfo?.label} model (${modelInfo?.dl}) - first use, please wait...` });
+          setStatus({ phase: 'processing', msg: `${modelInfo?.label}: preparing model; a download may be needed…` });
         }
 
+        const started = performance.now();
         const { maskBlob, width, height } = await fetchMask(item, model, settings.alphaMatte);
         setModelDownloading(false);
+        console.info('[processing]', model, item.name, 'backend seconds:', ((performance.now() - started) / 1000).toFixed(2));
+        setStatus({ phase: 'processing', msg: `Finishing PNG: ${item.name}` });
 
         await new Promise((resolve, reject) => {
           const handler = ({ data: msg }) => {
@@ -430,7 +441,12 @@ export default function App() {
     setModelDownloading(false);
     if (!cancelRef.current) setStatus({ phase: 'done', msg: 'Batch complete.' });
     cancelRef.current = false;
+    batchRunning.current = false;
   };
+
+  useEffect(() => {
+    if (autoProcess && serverOk && !isBusy && !batchRunning.current && items.some(it => it.status === 'queued')) processAll();
+  }, [autoProcess, serverOk, isBusy, items]);
 
   // -------------------------------------------------------------------------
   // Fetch mask from rembg server
@@ -592,6 +608,10 @@ export default function App() {
       <header>
         <div className="title-row">
           <h1>DeBG</h1>
+          {window.electronAPI && <button className="btn btn-ghost small pin-button" aria-pressed={alwaysOnTop} onClick={async () => {
+            try { setAlwaysOnTop(await window.electronAPI.setAlwaysOnTop(!alwaysOnTop)); }
+            catch (err) { setStatus({ phase: 'error', msg: err.message }); }
+          }}>{alwaysOnTop ? 'Unpin window' : 'Keep on top'}</button>}
           <div className={`server-pill ${serverOk ? 'ok' : serverStarting ? 'starting' : 'off'}`}>
             <span className="server-dot" />
             {serverOk ? 'Server ready' : serverStarting ? 'Starting up...' : 'Server offline'}
@@ -603,7 +623,7 @@ export default function App() {
           )}
         </div>
         <p className="sub">
-          Powered by <strong>rembg</strong> running locally. No internet needed after first model download.
+          Product images, ready to go. Process locally. Drag out a PNG.
         </p>
       </header>
 
@@ -628,7 +648,8 @@ export default function App() {
       )}
 
       {/* ---- Model picker ---- */}
-      <section className="controls">
+      <details className="controls accordion">
+        <summary>Model & output <span>{MODELS.find(m => m.id === model)?.label}</span></summary>
         <div className="model-picker">
           <label className="section-label">Model</label>
           <div className="model-grid">
@@ -640,21 +661,13 @@ export default function App() {
               >
                 <span className="model-name">{m.label}</span>
                 <span className="model-hint">{m.hint}</span>
-                <span className="model-dl">{m.dl} on first use</span>
+
               </button>
             ))}
           </div>
         </div>
 
         <div className="actions">
-          <button className="btn btn-primary" onClick={processAll} disabled={isBusy || !pending.length || !serverOk}>
-            {isBusy ? 'Processing…' : `Remove backgrounds (${pending.length})`}
-          </button>
-          {isBusy && (
-            <button className="btn btn-danger" onClick={() => { cancelRef.current = true; }}>
-              Cancel
-            </button>
-          )}
           <button className="btn btn-secondary" onClick={downloadZip} disabled={!done.length || downloading || isBusy}>
             {downloading ? 'Zipping…' : `Download ZIP (${done.length})`}
           </button>
@@ -690,7 +703,7 @@ export default function App() {
             )}
           </div>
         )}
-      </section>
+      </details>
 
       {/* ---- Backend switch panel ---- */}
       {showSwitch && (
@@ -713,7 +726,9 @@ export default function App() {
       )}
 
       {/* ---- Settings ---- */}
-      <section className="settings-panel">
+      <details className="settings-panel accordion">
+        <summary>Image settings <span>{settings.autoCrop ? 'Auto-crop on' : 'Full canvas'}</span></summary>
+        <label className="workflow-toggle"><input type="checkbox" checked={settings.autoCrop} onChange={e => updateSetting('autoCrop', e.target.checked)} /> Auto-crop transparent results</label>
         <div className="settings-grid">
           <div className="setting">
             <div className="setting-header">
@@ -781,10 +796,10 @@ export default function App() {
             <div className="setting-hint">rembg alpha matting - much better hair/fur edges (slower)</div>
           </div>
         </div>
-      </section>
+      </details>
 
       {/* ---- Drop zone ---- */}
-      <section ref={dropRef} className="dropzone" onClick={() => document.getElementById('file-input').click()}>
+      <section ref={dropRef} className="dropzone" role="button" tabIndex={0} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.getElementById('file-input').click(); } }} onClick={() => document.getElementById('file-input').click()}>
         <input id="file-input" type="file" accept={ACCEPTED.join(',')} multiple
           onChange={e => { addFiles(e.target.files); e.target.value = ''; }} hidden />
         <div className="dropzone-inner">
@@ -794,10 +809,19 @@ export default function App() {
         </div>
       </section>
 
+<label className="workflow-toggle auto-process"><input type="checkbox" checked={autoProcess} onChange={e => { setAutoProcess(e.target.checked); localStorage.setItem('debg.autoProcess', String(e.target.checked)); }} /> Process automatically on drop</label>
+
+      <div className="process-dock">
+        <div className="dock-actions">
+          <button className="btn btn-primary" onClick={processAll} disabled={isBusy || !pending.length || !serverOk}>{isBusy ? 'Processing…' : pending.length ? `Process ${pending.length} image${pending.length === 1 ? '' : 's'}` : 'Drop images to begin'}</button>
+          {isBusy && <button className="btn btn-ghost" onClick={() => { cancelRef.current = true; setAutoProcess(false); localStorage.setItem('debg.autoProcess', 'false'); }}>Stop after current</button>}
+        </div>
       {/* ---- Status ---- */}
       <div className={`status status-${status.phase}`}>
         <span className="status-dot" />
-        <span>{status.msg}</span>
+        <span role="status">{status.msg}</span>
+      </div>
+
       </div>
 
       {/* ---- Gallery ---- */}
@@ -871,7 +895,7 @@ export default function App() {
                     </div>
                     <span className="list-name" title={it.name}>{it.name}</span>
                     <span className={`list-badge badge-${it.status}`}>
-                      {it.status === 'processing' && modelDownloading ? 'downloading' : it.status}
+                      {it.status === 'processing' && modelDownloading ? 'preparing' : it.status}
                     </span>
                     <div className="card-actions" onClick={e => e.stopPropagation()}>
                       {it.status === 'done' && (
@@ -931,7 +955,7 @@ export default function App() {
                       ) : it.status === 'processing' ? (
                         <div className="placeholder">
                           <div className="spinner" />
-                          {modelDownloading ? 'Downloading model…' : 'Processing…'}
+                          {modelDownloading ? 'Preparing model…' : 'Processing…'}
                         </div>
                       ) : (
                         <div className="placeholder muted">Pending</div>
@@ -1004,7 +1028,7 @@ export default function App() {
                 <img src={lightboxItem.sourceUrl} alt={lightboxItem.name} className="lb-original-img" />
                 <div className="lb-pending-msg">
                   {lightboxItem.status === 'processing'
-                    ? (modelDownloading ? '⬇ Downloading model for first use…' : '⏳ Processing…')
+                    ? (modelDownloading ? 'Preparing model…' : '⏳ Processing…')
                     : lightboxItem.status === 'error'
                       ? `✕ Error: ${lightboxItem.error}`
                       : 'Not processed yet. Click Remove backgrounds to generate result.'}
@@ -1019,7 +1043,7 @@ export default function App() {
         <span>
           <a href="https://github.com/danielgatis/rembg" target="_blank" rel="noreferrer">danielgatis/rembg</a>
           {' · '}
-          <a href="https://huggingface.co/briaai/RMBG-1.4" target="_blank" rel="noreferrer">briaai/RMBG-1.4</a>
+          <a href="https://huggingface.co/briaai/RMBG-2.0" target="_blank" rel="noreferrer">briaai/RMBG-2.0</a>
         </span>
         <span>DeBG - local, private, no uploads</span>
       </footer>
