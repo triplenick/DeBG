@@ -13,7 +13,7 @@ def prepare_runtime():
             ort.preload_dlls(directory="")
 
 
-def bria_providers():
+def low_memory_cuda_providers():
     # Avoid cuDNN's large exhaustive-search workspace and arena over-allocation.
     return [("CUDAExecutionProvider", {
         "cudnn_conv_algo_search": "HEURISTIC",
@@ -29,9 +29,10 @@ def configure_sessions():
     original = command.new_session
 
     def new_session(model_name, *args, **kwargs):
-        if (model_name == "bria-rmbg" and "providers" not in kwargs
+        if ((model_name == "bria-rmbg" or model_name.startswith("birefnet-"))
+                and "providers" not in kwargs
                 and "CUDAExecutionProvider" in ort.get_available_providers()):
-            kwargs["providers"] = bria_providers()
+            kwargs["providers"] = low_memory_cuda_providers()
         return original(model_name, *args, **kwargs)
 
     command.new_session = new_session

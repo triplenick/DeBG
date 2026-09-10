@@ -15,6 +15,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   setAlwaysOnTop: value => ipcRenderer.invoke('window:set-always-on-top', value),
 
+  readClipboardImage: () => ipcRenderer.invoke('clipboard:read-image'),
+
   // --- Models ---
   checkModelCached: (modelId) => ipcRenderer.invoke('model:check', modelId),
 

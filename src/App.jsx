@@ -112,6 +112,8 @@ export default function App() {
   const [autoProcess, setAutoProcess] = useState(() => localStorage.getItem('debg.autoProcess') === 'true');
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const batchRunning = useRef(false);
+  const pasteBusy = useRef(false);
+  const [pasteMessage, setPasteMessage] = useState('');
   const [model,    setModel]    = useState('birefnet-general');
   const [items,    setItems]    = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -323,6 +325,52 @@ export default function App() {
       resultBlob: null, resultUrl: null, error: null,
     })), ...prev]);
   }, []);
+
+  const pasteClipboard = useCallback(async () => {
+    if (pasteBusy.current) return;
+    pasteBusy.current = true;
+    setPasteMessage('');
+    try {
+      let blob;
+      if (window.electronAPI) {
+        const bytes = await window.electronAPI.readClipboardImage();
+        if (bytes) blob = new Blob([bytes], { type: 'image/png' });
+      } else if (navigator.clipboard?.read) {
+        const entries = await navigator.clipboard.read();
+        for (const entry of entries) {
+          const type = entry.types.find(type => ACCEPTED.includes(type));
+          if (type) { blob = await entry.getType(type); break; }
+        }
+      } else {
+        setPasteMessage('Use Ctrl+V to paste an image.');
+        return;
+      }
+      if (!blob) { setPasteMessage('No image on the clipboard. Copy an image or screenshot first.'); return; }
+      const ext = blob.type === 'image/jpeg' ? 'jpg' : blob.type.split('/')[1];
+      addFiles([new File([blob], 'Clipboard-' + Date.now() + '.' + ext, { type: blob.type })]);
+      setPasteMessage('Image added.');
+    } catch (err) {
+      setPasteMessage('Could not paste image: ' + err.message);
+    } finally { pasteBusy.current = false; }
+  }, [addFiles]);
+
+  useEffect(() => {
+    const onPaste = event => {
+      // Preserve normal paste in editable controls.
+      if (event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]')) return;
+      const images = Array.from(event.clipboardData?.files || []).filter(file => ACCEPTED.includes(file.type));
+      if (images.length) {
+        event.preventDefault();
+        addFiles(images);
+        setPasteMessage('Image added.');
+      } else if (window.electronAPI) {
+        event.preventDefault();
+        pasteClipboard();
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [addFiles, pasteClipboard]);
 
   useEffect(() => {
     const node = dropRef.current;
@@ -809,7 +857,8 @@ export default function App() {
         </div>
       </section>
 
-<label className="workflow-toggle auto-process"><input type="checkbox" checked={autoProcess} onChange={e => { setAutoProcess(e.target.checked); localStorage.setItem('debg.autoProcess', String(e.target.checked)); }} /> Process automatically on drop</label>
+<div className="paste-row"><button type="button" className="btn btn-ghost small" onClick={pasteClipboard}>Paste image <kbd>Ctrl+V</kbd></button><span role="status">{pasteMessage}</span></div>
+      <label className="workflow-toggle auto-process"><input type="checkbox" checked={autoProcess} onChange={e => { setAutoProcess(e.target.checked); localStorage.setItem('debg.autoProcess', String(e.target.checked)); }} /> Process automatically on drop</label>
 
       <div className="process-dock">
         <div className="dock-actions">

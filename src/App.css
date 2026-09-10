@@ -988,3 +988,7 @@ h1 { background: none; color: var(--text); font-size: 23px; letter-spacing: -.8p
   .lightbox-hdr { flex-wrap: wrap; gap: 8px; }
   footer { flex-wrap: wrap; gap: 8px; }
 }
+
+.paste-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.paste-row kbd { margin-left: 10px; font: inherit; color: var(--muted); }
+.paste-row > span { font-size: 12px; color: var(--muted); }

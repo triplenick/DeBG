@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Menu, nativeImage, clipboard } = require('electron');
 const path = require('path');
 const { checkReadiness } = require('./server-health.cjs');
 const { createDragFiles } = require('./drag-files.cjs');
@@ -285,6 +285,12 @@ function trustedDragSender(event) {
   return mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents
     && event.senderFrame === mainWindow.webContents.mainFrame;
 }
+ipcMain.handle('clipboard:read-image', event => {
+  if (!trustedDragSender(event)) throw new Error('Untrusted clipboard sender.');
+  const image = clipboard.readImage();
+  return image.isEmpty() ? null : image.toPNG();
+});
+
 ipcMain.handle('result:prepare-drag', async (event, { name, buffer }) => {
   if (!trustedDragSender(event)) throw new Error('Untrusted drag sender.');
   const preparation = dragFiles.prepare(event.sender.id, name, buffer);
